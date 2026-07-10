@@ -488,9 +488,14 @@ def parse_bulletin_detail(driver, bulletin_dict: Dict) -> SecurityBulletin:
                 if lib_info["ifix_liberty"]:
                     bulletin.ifix_v9 = lib_info["ifix_liberty"]
 
+                # 取 Liberty iFix URL（連結格式：ibm.com/support/pages/node/XXXXXXX）
+                lib_url_v9, _ = _get_ifix_urls(soup, bulletin.ifix_v9, "")
+                bulletin.ifix_v9_url = lib_url_v9
+
                 logger.info(
-                    "  Liberty: ifix=%s fixpack=%s date=%s",
-                    bulletin.ifix_v9, bulletin.fixpack_v9, bulletin.fixpack_date_v9
+                    "  Liberty: ifix=%s url=%s fixpack=%s date=%s",
+                    bulletin.ifix_v9, bulletin.ifix_v9_url,
+                    bulletin.fixpack_v9, bulletin.fixpack_date_v9
                 )
 
     except Exception as e:
