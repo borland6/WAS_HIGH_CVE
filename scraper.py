@@ -21,10 +21,10 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
 import crawler
-import parser as detail_parser
+import bulletin_parser as detail_parser
 import report
 from models import SecurityBulletin
-from parser import expand_bulletin_to_rows
+from bulletin_parser import expand_bulletin_to_rows
 
 
 def setup_logging(verbose: bool = False):
