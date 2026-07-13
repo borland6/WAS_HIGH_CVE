@@ -36,19 +36,23 @@ class SecurityBulletin:
     # 欄位 6：CVSS Base Score（來自內頁，各 CVE 各自的分數）
     cvss_score: float = 0.0
 
-    # 欄位 7：iFix — V9 和 V8 各自的編號與連結
+    # 欄位 7：iFix — V9、V8、Liberty 各自的編號與連結
     ifix_v9: str = ""        # 例如 "PH71670"
     ifix_v9_url: str = ""
     ifix_v8: str = ""
     ifix_v8_url: str = ""
+    ifix_liberty: str = ""
+    ifix_liberty_url: str = ""
 
-    # 欄位 8：Fixpack Version — V9 和 V8 各自的完整版本號（Apply Fix Pack 後的版本）
+    # 欄位 8：Fixpack Version — V9、V8、Liberty 各自的完整版本號（Apply Fix Pack 後的版本）
     fixpack_v9: str = ""     # 例如 "9.0.5.29"
     fixpack_v8: str = ""     # 例如 "8.5.5.31"
+    fixpack_liberty: str = ""
 
-    # 欄位 9：Fixpack Release Date — V9 和 V8 各自的 targeted availability
+    # 欄位 9：Fixpack Release Date — V9、V8、Liberty 各自的 targeted availability
     fixpack_date_v9: str = ""  # 例如 "3Q2026"
     fixpack_date_v8: str = ""
+    fixpack_date_liberty: str = ""
 
     # 內部欄位：來自清單頁的原始 severity（作為 fallback）
     _list_severity: str = ""

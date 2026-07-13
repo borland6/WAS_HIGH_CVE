@@ -158,6 +158,61 @@ RE_LIBERTY_VERSION_RANGE = re.compile(
 )
 
 
+def _fallback_detect_bulletin_type(page_text: str, title: str) -> str:
+    """當 Affected Products 區段不存在時，從全文與標題判斷公告類型。"""
+    has_liberty = "liberty" in page_text.lower() or "liberty" in title.lower()
+    has_traditional = bool(
+        re.search(r"\b(V9\.0\.0\.0|V8\.5\.0\.0|WebSphere Application Server traditional)\b", page_text, re.IGNORECASE)
+    )
+    if has_traditional and has_liberty:
+        return "both"
+    if has_liberty:
+        return "liberty"
+    return "traditional"
+
+
+def _fallback_parse_cve_details(text: str, cve_ids: List[str]) -> List[CveDetail]:
+    """當找不到 Vulnerability Details 段落時，直接從全文抓取每個 CVE 的 CVSS。"""
+    details: List[CveDetail] = []
+    upper_text = text.upper()
+    for cve_id in cve_ids:
+        idx = upper_text.find(cve_id.upper())
+        score = 0.0
+        if idx != -1:
+            window = text[idx:idx + 1200]
+            m = re.search(r"CVSS\s*Base\s*score\s*:?[\s\n]*([0-9]+(?:\.[0-9])?)", window, re.IGNORECASE)
+            if m:
+                score = float(m.group(1))
+        details.append(CveDetail(cve_id=cve_id.upper(), cvss_score=score, severity=_severity_from_score(score)))
+    return details
+
+
+def _fallback_find_affected_versions(text: str, bulletin_type: str) -> str:
+    """當找不到 Affected Products 區段時，從全文抓受影響版本。"""
+    liberty_match = RE_LIBERTY_VERSION_RANGE.search(text)
+    if bulletin_type == "liberty":
+        if liberty_match:
+            return liberty_match.group(1).strip()
+        return ""
+    if bulletin_type == "both":
+        if liberty_match:
+            return f"9.0, 8.5<br>{liberty_match.group(1).strip()}"
+        return "9.0, 8.5"
+    return "9.0, 8.5"
+
+
+def _find_first_url_for_ifix(soup: BeautifulSoup, label: str) -> str:
+    if not label:
+        return ""
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        text = a.get_text(strip=True)
+        if label.upper() in text.upper() or label.upper() in href.upper():
+            return href
+    return ""
+
+
+
 def _detect_bulletin_type(lines: List[str], aff_start: int, rem_start: int) -> str:
     """
     偵測 Bulletin 類型：
@@ -198,22 +253,29 @@ def _parse_affected_versions(lines: List[str], aff_start: int, rem_start: int) -
     aff_end = rem_start if rem_start > aff_start else aff_start + 20
     aff_lines = lines[aff_start:aff_end]
 
-    # 找 "Version(s)" 標題行後的版本值
-    for i, l in enumerate(aff_lines):
-        if re.match(r"Version\(s\)", l, re.IGNORECASE):
-            # 往後找第一個符合版本範圍格式的行
-            for candidate in aff_lines[i+1:i+6]:
-                if RE_LIBERTY_VERSION_RANGE.search(candidate):
-                    return candidate.strip()
-                # 也接受純版本號格式（例如 "9.0" 或 "9.0, 8.5"）
-                if re.match(r"[\d.,\s\-–]+$", candidate.strip()) and candidate.strip():
-                    return candidate.strip()
+    aff_text = "\n".join(aff_lines)
 
-    # Fallback：直接掃版本範圍格式
+    # 先抓 Liberty 範圍格式
     for l in aff_lines:
         m = RE_LIBERTY_VERSION_RANGE.search(l)
         if m:
             return m.group(1).strip()
+
+    # 若表格中同時出現 V9 / V8 的 traditional 版本，統一回傳報表使用值
+    has_v9 = bool(re.search(r"\b9\.0(?:\.0\.0)?\b|\bV9\b", aff_text, re.IGNORECASE))
+    has_v8 = bool(re.search(r"\b8\.5(?:\.0\.0)?\b|\bV8\b", aff_text, re.IGNORECASE))
+    if has_v9 and has_v8:
+        return "9.0, 8.5"
+
+    # 找 "Version(s)" 標題行後的版本值，但忽略單獨的 9.0 / 8.5
+    for i, l in enumerate(aff_lines):
+        if re.match(r"Version\(s\)", l, re.IGNORECASE):
+            for candidate in aff_lines[i+1:i+6]:
+                candidate = candidate.strip()
+                if candidate in {"9.0", "8.5", "9.0, 8.5", "8.5, 9.0"}:
+                    continue
+                if re.match(r"[\d.,\s\-–]+$", candidate) and candidate:
+                    return candidate
 
     return ""
 
@@ -415,7 +477,7 @@ def parse_bulletin_detail(driver, bulletin_dict: Dict) -> SecurityBulletin:
             (i for i, l in enumerate(lines) if "Affected Products and Versions" in l), -1
         )
         rem_start = next(
-            (i for i, l in enumerate(lines) if re.match(r"Remediation", l, re.IGNORECASE)), -1
+            (i for i, l in enumerate(lines) if re.match(r"Remediation(?:/Fixes)?", l, re.IGNORECASE)), -1
         )
 
         if vd_start == -1:
@@ -428,6 +490,10 @@ def parse_bulletin_detail(driver, bulletin_dict: Dict) -> SecurityBulletin:
         # 1. 解析每個 CVE 的 CVSS Score
         if vd_start != -1:
             bulletin.cve_details = _parse_cve_details(lines, vd_start, vd_end)
+        elif cve_ids_from_list:
+            bulletin.cve_details = _fallback_parse_cve_details(text, cve_ids_from_list)
+
+        if bulletin.cve_details:
             logger.info(
                 "  解析到 %d 個 CVE: %s",
                 len(bulletin.cve_details),
@@ -444,14 +510,21 @@ def parse_bulletin_detail(driver, bulletin_dict: Dict) -> SecurityBulletin:
         bulletin_type = "traditional"
         if aff_start != -1 and rem_start != -1:
             bulletin_type = _detect_bulletin_type(lines, aff_start, rem_start)
+        else:
+            bulletin_type = _fallback_detect_bulletin_type(text, title)
         logger.info("  Bulletin 類型: %s", bulletin_type)
 
-        # 3. 解析 Affected Versions（Liberty-only 時從表格取）
-        if bulletin_type == "liberty" and aff_start != -1:
+        # 3. 解析 Affected Versions
+        if aff_start != -1:
             affected_ver = _parse_affected_versions(lines, aff_start, rem_start)
             if affected_ver:
-                bulletin.affected_versions = affected_ver
-                logger.info("  Liberty Affected Versions: %s", affected_ver)
+                if bulletin_type == "both" and affected_ver != "9.0, 8.5" and "<br>" not in affected_ver:
+                    bulletin.affected_versions = f"9.0, 8.5<br>{affected_ver}"
+                else:
+                    bulletin.affected_versions = affected_ver
+                logger.info("  Affected Versions: %s", bulletin.affected_versions)
+        else:
+            bulletin.affected_versions = _fallback_find_affected_versions(text, bulletin_type)
 
         # 4. 解析 Remediation（iFix + Fixpack）
         if rem_start != -1:
@@ -480,22 +553,27 @@ def parse_bulletin_detail(driver, bulletin_dict: Dict) -> SecurityBulletin:
 
             if bulletin_type in ("liberty", "both"):
                 lib_info = _parse_liberty_fixpack(lines, rem_start)
-                # Liberty 的 Fixpack 存入 fixpack_v9（Liberty 專用欄），
-                # ifix 存入 ifix_v9，日期存入 fixpack_date_v9
-                # （Liberty-only 時 V8 欄留空）
-                bulletin.fixpack_v9 = lib_info["fixpack_liberty"]
-                bulletin.fixpack_date_v9 = lib_info["fixpack_date_liberty"]
-                if lib_info["ifix_liberty"]:
-                    bulletin.ifix_v9 = lib_info["ifix_liberty"]
+                if bulletin_type == "liberty":
+                    bulletin.fixpack_v9 = lib_info["fixpack_liberty"]
+                    bulletin.fixpack_date_v9 = lib_info["fixpack_date_liberty"]
+                    if lib_info["ifix_liberty"]:
+                        bulletin.ifix_v9 = lib_info["ifix_liberty"]
 
-                # 取 Liberty iFix URL（連結格式：ibm.com/support/pages/node/XXXXXXX）
-                lib_url_v9, _ = _get_ifix_urls(soup, bulletin.ifix_v9, "")
-                bulletin.ifix_v9_url = lib_url_v9
+                    lib_url_v9, _ = _get_ifix_urls(soup, bulletin.ifix_v9, "")
+                    bulletin.ifix_v9_url = lib_url_v9
+                else:
+                    bulletin.fixpack_liberty = lib_info["fixpack_liberty"]
+                    bulletin.fixpack_date_liberty = lib_info["fixpack_date_liberty"]
+                    bulletin.ifix_liberty = lib_info["ifix_liberty"]
+                    lib_url_v9, _ = _get_ifix_urls(soup, bulletin.ifix_liberty, "")
+                    bulletin.ifix_liberty_url = lib_url_v9
 
                 logger.info(
                     "  Liberty: ifix=%s url=%s fixpack=%s date=%s",
-                    bulletin.ifix_v9, bulletin.ifix_v9_url,
-                    bulletin.fixpack_v9, bulletin.fixpack_date_v9
+                    bulletin.ifix_v9 if bulletin_type == "liberty" else bulletin.ifix_liberty,
+                    bulletin.ifix_v9_url if bulletin_type == "liberty" else bulletin.ifix_liberty_url,
+                    bulletin.fixpack_v9 if bulletin_type == "liberty" else bulletin.fixpack_liberty,
+                    bulletin.fixpack_date_v9 if bulletin_type == "liberty" else bulletin.fixpack_date_liberty
                 )
 
     except Exception as e:
@@ -548,10 +626,14 @@ def expand_bulletin_to_rows(bulletin: SecurityBulletin, min_cvss: float = 7.0) -
                 ifix_v9_url=bulletin.ifix_v9_url,
                 ifix_v8=bulletin.ifix_v8,
                 ifix_v8_url=bulletin.ifix_v8_url,
+                ifix_liberty=bulletin.ifix_liberty,
+                ifix_liberty_url=bulletin.ifix_liberty_url,
                 fixpack_v9=bulletin.fixpack_v9,
                 fixpack_v8=bulletin.fixpack_v8,
+                fixpack_liberty=bulletin.fixpack_liberty,
                 fixpack_date_v9=bulletin.fixpack_date_v9,
                 fixpack_date_v8=bulletin.fixpack_date_v8,
+                fixpack_date_liberty=bulletin.fixpack_date_liberty,
             )
             rows.append(row)
 
@@ -569,10 +651,14 @@ def expand_bulletin_to_rows(bulletin: SecurityBulletin, min_cvss: float = 7.0) -
             ifix_v9_url=bulletin.ifix_v9_url,
             ifix_v8=bulletin.ifix_v8,
             ifix_v8_url=bulletin.ifix_v8_url,
+            ifix_liberty=bulletin.ifix_liberty,
+            ifix_liberty_url=bulletin.ifix_liberty_url,
             fixpack_v9=bulletin.fixpack_v9,
             fixpack_v8=bulletin.fixpack_v8,
+            fixpack_liberty=bulletin.fixpack_liberty,
             fixpack_date_v9=bulletin.fixpack_date_v9,
             fixpack_date_v8=bulletin.fixpack_date_v8,
+            fixpack_date_liberty=bulletin.fixpack_date_liberty,
         ))
 
     return rows

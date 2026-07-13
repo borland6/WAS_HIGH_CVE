@@ -77,9 +77,16 @@ def _cve_link(cve_id: str) -> str:
     return f'<a href="{url}" target="_blank" rel="noopener" class="cve-link">{cve_id}</a>'
 
 
-def _ifix_cell(v9_label: str, v9_url: str, v8_label: str, v8_url: str,
-               is_liberty: bool = False) -> str:
-    """回傳 iFix 欄位 HTML。Liberty-only 時標籤顯示 'Liberty:'，否則 V9:/V8:。"""
+def _ifix_cell(
+    v9_label: str,
+    v9_url: str,
+    v8_label: str,
+    v8_url: str,
+    liberty_label: str = "",
+    liberty_url: str = "",
+    is_liberty: bool = False,
+) -> str:
+    """回傳 iFix 欄位 HTML。"""
     lines = []
 
     def _make_link(label: str, url: str, prefix: str) -> str:
@@ -91,39 +98,52 @@ def _ifix_cell(v9_label: str, v9_url: str, v8_label: str, v8_url: str,
         return f'<span class="ifix-text">{text}</span>'
 
     if is_liberty:
-        v9 = _make_link(v9_label, v9_url, "Liberty: ")
+        liberty = _make_link(v9_label, v9_url, "Liberty: ")
+        if liberty:
+            lines.append(liberty)
     else:
         v9 = _make_link(v9_label, v9_url, "V9: ")
-    v8 = _make_link(v8_label, v8_url, "V8: ")
-
-    if v9:
-        lines.append(v9)
-    if v8:
-        lines.append(v8)
+        v8 = _make_link(v8_label, v8_url, "V8: ")
+        liberty = _make_link(liberty_label, liberty_url, "Liberty: ")
+        if v9:
+            lines.append(v9)
+        if v8:
+            lines.append(v8)
+        if liberty:
+            lines.append(liberty)
 
     return "<br>".join(lines) if lines else '<span class="text-muted">—</span>'
 
 
-def _fixpack_cell(v9: str, v8: str, is_liberty: bool = False) -> str:
-    """回傳 Fixpack Version 欄位 HTML。Liberty-only 時標籤顯示 'Liberty:'。"""
+def _fixpack_cell(v9: str, v8: str, liberty: str = "", is_liberty: bool = False) -> str:
+    """回傳 Fixpack Version 欄位 HTML。"""
     lines = []
-    if v9:
-        tag_class = "liberty-tag" if is_liberty else "v9-tag"
-        prefix = "Liberty: " if is_liberty else "V9: "
-        lines.append(f'<span class="version-tag {tag_class}">{prefix}{v9}</span>')
-    if v8:
-        lines.append(f'<span class="version-tag v8-tag">V8: {v8}</span>')
+    if is_liberty:
+        if v9:
+            lines.append(f'<span class="version-tag liberty-tag">Liberty: {v9}</span>')
+    else:
+        if v9:
+            lines.append(f'<span class="version-tag v9-tag">V9: {v9}</span>')
+        if v8:
+            lines.append(f'<span class="version-tag v8-tag">V8: {v8}</span>')
+        if liberty:
+            lines.append(f'<span class="version-tag liberty-tag">Liberty: {liberty}</span>')
     return "<br>".join(lines) if lines else '<span class="text-muted">—</span>'
 
 
-def _fixdate_cell(v9_date: str, v8_date: str, is_liberty: bool = False) -> str:
-    """回傳 Fixpack Release Date 欄位 HTML。Liberty-only 時標籤顯示 'Liberty:'。"""
+def _fixdate_cell(v9_date: str, v8_date: str, liberty_date: str = "", is_liberty: bool = False) -> str:
+    """回傳 Fixpack Release Date 欄位 HTML。"""
     lines = []
-    if v9_date:
-        prefix = "Liberty: " if is_liberty else "V9: "
-        lines.append(f'<span class="date-tag">{prefix}{v9_date}</span>')
-    if v8_date:
-        lines.append(f'<span class="date-tag">V8: {v8_date}</span>')
+    if is_liberty:
+        if v9_date:
+            lines.append(f'<span class="date-tag">Liberty: {v9_date}</span>')
+    else:
+        if v9_date:
+            lines.append(f'<span class="date-tag">V9: {v9_date}</span>')
+        if v8_date:
+            lines.append(f'<span class="date-tag">V8: {v8_date}</span>')
+        if liberty_date:
+            lines.append(f'<span class="date-tag">Liberty: {liberty_date}</span>')
     return "<br>".join(lines) if lines else '<span class="text-muted">—</span>'
 
 
@@ -138,8 +158,12 @@ def _build_table_rows(bulletins: List[SecurityBulletin]) -> str:
     """組裝所有表格列 HTML。"""
     rows = []
     for b in bulletins:
-        # 判斷是否為 Liberty-only（V8 欄位皆空，且 affected_versions 含版本範圍格式）
-        is_liberty = not b.fixpack_v8 and not b.ifix_v8 and b.affected_versions != "9.0, 8.5"
+        # 判斷是否為 Liberty-only（只有 V9 欄承載 Liberty 資料）
+        is_liberty = (
+            not b.ifix_v8 and not b.fixpack_v8 and not b.fixpack_date_v8
+            and not b.ifix_liberty and not b.fixpack_liberty and not b.fixpack_date_liberty
+            and b.affected_versions != "9.0, 8.5"
+        )
 
         # 依 Severity 決定列背景色
         sev = b.severity.lower()
@@ -152,9 +176,9 @@ def _build_table_rows(bulletins: List[SecurityBulletin]) -> str:
           <td class="text-center">{_severity_badge(b.severity)}</td>
           <td class="text-nowrap">{b.publish_date or "—"}</td>
           <td class="text-center">{_cvss_badge(b.cvss_score)}</td>
-          <td class="fix-col">{_ifix_cell(b.ifix_v9, b.ifix_v9_url, b.ifix_v8, b.ifix_v8_url, is_liberty)}</td>
-          <td class="fix-col">{_fixpack_cell(b.fixpack_v9, b.fixpack_v8, is_liberty)}</td>
-          <td class="text-center">{_fixdate_cell(b.fixpack_date_v9, b.fixpack_date_v8, is_liberty)}</td>
+          <td class="fix-col">{_ifix_cell(b.ifix_v9, b.ifix_v9_url, b.ifix_v8, b.ifix_v8_url, b.ifix_liberty, b.ifix_liberty_url, is_liberty)}</td>
+          <td class="fix-col">{_fixpack_cell(b.fixpack_v9, b.fixpack_v8, b.fixpack_liberty, is_liberty)}</td>
+          <td class="text-center">{_fixdate_cell(b.fixpack_date_v9, b.fixpack_date_v8, b.fixpack_date_liberty, is_liberty)}</td>
         </tr>"""
         rows.append(row)
     return "\n".join(rows)

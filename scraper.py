@@ -108,6 +108,7 @@ def create_driver(headless: bool = True) -> webdriver.Chrome:
     # Selenium 4.6+ 內建 selenium-manager，不需手動指定 Service/ChromeDriver
     driver = webdriver.Chrome(options=options)
     driver.implicitly_wait(5)
+    driver.set_page_load_timeout(300)
     return driver
 
 

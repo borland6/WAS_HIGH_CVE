@@ -10,8 +10,9 @@
 - 🔍 **自動爬取** IBM Security Bulletin 搜尋頁，支援多頁分頁
 - 🎯 **雙重篩選**：Severity（High / Critical）且 Publish Date 在指定天數內
 - 📊 **個別 CVE 展開**：一篇 Bulletin 含多個 CVE 時，各自獨立列出
-- 🏷️ **類型識別**：自動區分 WAS Traditional（V9/V8）與 Liberty Bulletin
+- 🏷️ **類型識別**：自動區分 WAS Traditional（V9/V8）、Liberty 與混合型 Bulletin
 - 🔧 **Fixpack 解析**：正確取 `Apply Fix Pack` 後的目標版本號（非舊版）
+- 🧩 **Fallback 解析**：當 IBM 內頁缺少固定段落標題時，仍會從全文補抓 CVSS、Affected Versions 與 Remediation 資訊
 - 📄 **Bootstrap 5 + DataTables**：可排序、可搜尋、RWD 響應式 HTML 報表
 - 🕒 **時間戳記檔名**：每次執行自動產生含日期時間的報表檔名
 
@@ -22,7 +23,7 @@
 | # | 欄位 | 說明 |
 |---|------|------|
 | 1 | Security Bulletin | 標題（含原始頁面連結） |
-| 2 | Affected WAS Version | Traditional → `9.0, 8.5`；Liberty → 版本範圍，例如 `17.0.0.3 - 26.0.0.7` |
+| 2 | Affected WAS Version | Traditional → `9.0, 8.5`；Liberty → 版本範圍，例如 `17.0.0.3 - 26.0.0.7`；混合型 Bulletin → `9.0, 8.5` 與 Liberty 範圍分兩列顯示 |
 | 3 | CVE-ID | 連結至 MITRE CVE 資料庫 |
 | 4 | Severity | Critical（紅色）/ High（橙色）顏色標示 |
 | 5 | Publish Date | 公告發布日期 |
@@ -125,7 +126,7 @@ output/report-2026-07-09-172452.html
 new-high-cve/
 ├── scraper.py       # 主程式：CLI 參數、主流程、WebDriver 初始化
 ├── crawler.py       # 清單頁爬蟲：爬取搜尋結果、處理分頁
-├── parser.py        # 內頁解析：CVSS Score、iFix、Fixpack、Affected Versions
+├── bulletin_parser.py # 內頁解析：CVSS Score、iFix、Fixpack、Affected Versions
 ├── report.py        # HTML 報表生成器（Bootstrap 5 + DataTables）
 ├── models.py        # 資料結構定義（SecurityBulletin、CveDetail dataclass）
 ├── requirements.txt # Python 相依套件
@@ -143,9 +144,11 @@ Step 1  開啟 IBM Security Bulletin 搜尋頁
 
 Step 2  逐一進入每篇 Bulletin 內頁
         解析各 CVE 的 CVSS Base Score
-        解析 Remediation/Fixes 段落：
+        解析 Affected Products / Remediation/Fixes 段落：
           - Traditional WAS → V9 / V8 的 iFix、Fixpack Version、Fixpack Release Date
           - Liberty → Liberty Fixpack 版本與日期、受影響版本範圍
+          - 混合型 Bulletin → 同時保留 V9 / V8 / Liberty 三組資料
+        若頁面缺少固定段落標題，則改以全文 fallback 解析
 
 Step 3  將含多個 CVE 的 Bulletin 展開為多筆輸出列
         依 CVSS 分數降冪排序
@@ -169,10 +172,10 @@ Step 4  生成 HTML 報表至 output/ 目錄
 - `~/.cache/selenium/chrome/linux64/*/chrome`
 - `~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome`
 
-**Q：部分 Bulletin 的 Fixpack Version 欄位空白**
+**Q：部分 Bulletin 的欄位為空或與頁面不一致**
 
-Liberty-only Bulletin 的 Fixpack 格式為 `Apply Liberty Fix Pack 26.0.0.7`，
-若 Remediation 段落中找不到此格式則欄位為空，屬正常現象（可查看 `--verbose` 輸出確認）。
+IBM Security Bulletin 內頁有時會缺少固定的 `Vulnerability Details`、`Affected Products and Versions` 或 `Remediation/Fixes` 標題。
+目前程式會先走結構化解析，失敗時再使用全文 fallback 解析；若 IBM 頁面本身未提供對應資訊，欄位仍可能為空。可搭配 `--verbose` 檢查實際解析過程。
 
 ---
 
