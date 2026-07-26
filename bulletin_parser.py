@@ -71,16 +71,36 @@ def _severity_from_score(score: float) -> str:
 
 
 def _wait_for_page_load(driver, timeout: int = WAIT_TIMEOUT):
-    """等待內頁主要內容載入。"""
+    """等待內頁主要內容載入。
+
+    策略：
+      1. 等待 DOM 中出現主要內容容器（body / article 等）
+      2. 再等待頁面文字包含 "CVSS Base score"，確保動態內容已渲染
+         — IBM 公告頁面的漏洞詳情由 JavaScript 非同步插入，若僅等 DOM 出現
+           會在 CVSS 分數插入前就開始解析，導致抓到 cvss=0。
+      3. 若 "CVSS Base score" 等待逾時，補等一段時間再繼續（graceful fallback）。
+    """
     try:
         WebDriverWait(driver, timeout).until(
             EC.presence_of_element_located(
                 (By.CSS_SELECTOR, "article, main, .ibm-content, #content, body")
             )
         )
-        time.sleep(1.5)
     except TimeoutException:
         logger.warning("等待頁面載入逾時，嘗試繼續解析")
+        return
+
+    # 等待 CVSS 分數文字出現在頁面上（最多再等 15 秒）
+    try:
+        WebDriverWait(driver, 15).until(
+            lambda d: "CVSS Base score" in d.page_source or "Vulnerability Details" in d.page_source
+        )
+    except TimeoutException:
+        logger.debug("  等待 CVSS 內容逾時，補等 3 秒後繼續")
+        time.sleep(3)
+        return
+
+    time.sleep(0.5)
 
 
 def _parse_cve_details(lines: List[str], vd_start: int, vd_end: int) -> List[CveDetail]:
@@ -172,14 +192,27 @@ def _fallback_detect_bulletin_type(page_text: str, title: str) -> str:
 
 
 def _fallback_parse_cve_details(text: str, cve_ids: List[str]) -> List[CveDetail]:
-    """當找不到 Vulnerability Details 段落時，直接從全文抓取每個 CVE 的 CVSS。"""
+    """當找不到 Vulnerability Details 段落時，直接從全文抓取每個 CVE 的 CVSS。
+
+    搜尋策略：優先從「Vulnerability Details」段落後的 CVE 位置開始；
+    若找不到該段落，則使用 CVE ID 最後一次出現的位置，以避免頁面標題等
+    早期出現的重複字串把搜尋 window 帶偏，導致搜尋不到 CVSS 分數。
+    """
     details: List[CveDetail] = []
     upper_text = text.upper()
+    # 以 Vulnerability Details 段落起點為搜尋基準，搜不到則從頭
+    vd_pos = upper_text.find("VULNERABILITY DETAILS")
+    search_from = vd_pos if vd_pos != -1 else 0
+
     for cve_id in cve_ids:
-        idx = upper_text.find(cve_id.upper())
+        # 優先取 Vulnerability Details 後的 CVE 位置，否則取全文最後一次
+        idx = upper_text.find(cve_id.upper(), search_from)
+        if idx == -1:
+            # 找全文最後一次出現（避開頁頭早期位置）
+            idx = upper_text.rfind(cve_id.upper())
         score = 0.0
         if idx != -1:
-            window = text[idx:idx + 1200]
+            window = text[idx:idx + 2000]
             m = re.search(r"CVSS\s*Base\s*score\s*:?[\s\n]*([0-9]+(?:\.[0-9])?)", window, re.IGNORECASE)
             if m:
                 score = float(m.group(1))
@@ -465,33 +498,51 @@ def parse_bulletin_detail(driver, bulletin_dict: Dict) -> SecurityBulletin:
     try:
         driver.get(url)
         _wait_for_page_load(driver)
-        soup = BeautifulSoup(driver.page_source, "lxml")
-        text = soup.get_text(separator="\n", strip=True)
-        lines = [l.strip() for l in text.split("\n")]  # 保留空行以維持結構
 
-        # 找各段落位置
-        vd_start = next(
-            (i for i, l in enumerate(lines) if "Vulnerability Details" in l), -1
-        )
-        aff_start = next(
-            (i for i, l in enumerate(lines) if "Affected Products and Versions" in l), -1
-        )
-        rem_start = next(
-            (i for i, l in enumerate(lines) if re.match(r"Remediation(?:/Fixes)?", l, re.IGNORECASE)), -1
-        )
+        # 最多重試 2 次：當頁面已載入但 cvss=0（動態內容未就緒）時重新讀取
+        for attempt in range(2):
+            soup = BeautifulSoup(driver.page_source, "lxml")
+            text = soup.get_text(separator="\n", strip=True)
+            lines = [l.strip() for l in text.split("\n")]
 
-        if vd_start == -1:
-            logger.warning("  找不到 Vulnerability Details 段落")
-        if rem_start == -1:
-            logger.warning("  找不到 Remediation 段落")
+            # 找各段落位置
+            vd_start = next(
+                (i for i, l in enumerate(lines) if "Vulnerability Details" in l), -1
+            )
+            aff_start = next(
+                (i for i, l in enumerate(lines) if "Affected Products and Versions" in l), -1
+            )
+            rem_start = next(
+                (i for i, l in enumerate(lines) if re.match(r"Remediation(?:/Fixes)?", l, re.IGNORECASE)), -1
+            )
+            vd_end = rem_start if rem_start > vd_start else len(lines)
 
-        vd_end = rem_start if rem_start > vd_start else len(lines)
+            # 1. 解析每個 CVE 的 CVSS Score
+            tmp_details: List[CveDetail] = []
+            if vd_start != -1:
+                tmp_details = _parse_cve_details(lines, vd_start, vd_end)
+                # VD 段落找到 CVE 但分數仍為 0 時，用全文 regex 補搜分數
+                missing_score = [d.cve_id for d in tmp_details if d.cvss_score == 0.0]
+                if missing_score:
+                    logger.debug("  VD 段落分數缺失，嘗試全文補搜: %s", missing_score)
+                    retry_details = _fallback_parse_cve_details(text, missing_score)
+                    score_map = {d.cve_id: d.cvss_score for d in retry_details if d.cvss_score > 0}
+                    for d in tmp_details:
+                        if d.cvss_score == 0.0 and d.cve_id in score_map:
+                            d.cvss_score = score_map[d.cve_id]
+                            d.severity = _severity_from_score(d.cvss_score)
+            elif cve_ids_from_list:
+                tmp_details = _fallback_parse_cve_details(text, cve_ids_from_list)
 
-        # 1. 解析每個 CVE 的 CVSS Score
-        if vd_start != -1:
-            bulletin.cve_details = _parse_cve_details(lines, vd_start, vd_end)
-        elif cve_ids_from_list:
-            bulletin.cve_details = _fallback_parse_cve_details(text, cve_ids_from_list)
+            # 若仍有 cvss=0 且還有重試機會，等待後重新讀取頁面
+            still_missing = [d.cve_id for d in tmp_details if d.cvss_score == 0.0]
+            if still_missing and attempt == 0:
+                logger.warning("  [attempt %d] cvss=0 仍未解析: %s，等待 3 秒後重試", attempt + 1, still_missing)
+                time.sleep(3)
+                continue  # 重新讀取 page_source
+
+            bulletin.cve_details = tmp_details
+            break
 
         if bulletin.cve_details:
             logger.info(
@@ -500,11 +551,26 @@ def parse_bulletin_detail(driver, bulletin_dict: Dict) -> SecurityBulletin:
                 [(d.cve_id, d.cvss_score) for d in bulletin.cve_details]
             )
 
-        # 若內頁解析不到 CVE，用清單頁的 CVE ID 補入（CVSS=0）
-        if not bulletin.cve_details and cve_ids_from_list:
-            for cid in cve_ids_from_list:
-                bulletin.cve_details.append(CveDetail(cve_id=cid, cvss_score=0.0))
-            logger.debug("  使用清單頁 CVE IDs 作為 fallback")
+        # 若內頁解析不到 CVE，依序嘗試：清單頁 CVE IDs → title 中的 CVE IDs
+        if not bulletin.cve_details:
+            fallback_ids = cve_ids_from_list or RE_CVE.findall(title.upper())
+            if fallback_ids:
+                bulletin.cve_details = _fallback_parse_cve_details(text, fallback_ids)
+                logger.debug(
+                    "  CVE ID fallback（%s）: %s",
+                    "清單頁" if cve_ids_from_list else "title",
+                    fallback_ids,
+                )
+            # 若全文也搜不到分數，至少保留 CVE ID（CVSS=0）
+            if not bulletin.cve_details and fallback_ids:
+                for cid in fallback_ids:
+                    bulletin.cve_details.append(CveDetail(cve_id=cid, cvss_score=0.0))
+                logger.debug("  使用 fallback CVE IDs，CVSS=0")
+
+        if vd_start == -1:
+            logger.warning("  找不到 Vulnerability Details 段落")
+        if rem_start == -1:
+            logger.warning("  找不到 Remediation 段落")
 
         # 2. 偵測 Bulletin 類型（traditional / liberty / both）
         bulletin_type = "traditional"
@@ -637,8 +703,10 @@ def expand_bulletin_to_rows(bulletin: SecurityBulletin, min_cvss: float = 7.0) -
             )
             rows.append(row)
 
-    # 若沒有任何 CVE 符合條件（或 cve_details 為空），建立一筆 placeholder
-    if not rows and bulletin._list_severity.lower() in {"high", "critical"}:
+    # 若 cve_details 完全為空（解析失敗），才建立 placeholder 兜底。
+    # 注意：若 cve_details 有資料但全部低於 min_cvss，代表篩選結果正常為空，
+    # 不應建立 placeholder（否則 --min-cvss 較高時會輸出錯誤的 N/A 列）。
+    if not rows and not bulletin.cve_details and bulletin._list_severity.lower() in {"high", "critical"}:
         rows.append(SecurityBulletin(
             title=bulletin.title,
             bulletin_url=bulletin.bulletin_url,
