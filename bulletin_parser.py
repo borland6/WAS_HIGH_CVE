@@ -44,7 +44,7 @@ WAIT_TIMEOUT = 20
 
 # 正規表示式
 RE_CVE = re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE)
-RE_IFIX = re.compile(r"\b((?:PH|PI|PM|PK|PT|IF)\d{5,})\b", re.IGNORECASE)
+RE_IFIX = re.compile(r"\b((?:PH|PI|PM|PK|PT|IF|DT)\d{5,})\b", re.IGNORECASE)
 RE_FIXPACK_V9 = re.compile(r"\b(9\.\d+\.\d+\.\d+)\b")
 RE_FIXPACK_V8 = re.compile(r"\b(8\.\d+\.\d+\.\d+)\b")
 RE_QUARTER = re.compile(r"\b([1-4]Q\s*\d{4})\b", re.IGNORECASE)
